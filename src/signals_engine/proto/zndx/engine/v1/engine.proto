@@ -1,0 +1,1076 @@
+// zndx.engine.v1 — the SHARED engine service identity for the signals federation.
+//
+// WHY (measured 2026-07-03, the first live cross-engine call): the per-project engines
+// (aegir.engine.AegirEngine :50151, atelier.engine.AtelierEngine :50251, gaius :50051) mirror each
+// other's message SHAPES, but gRPC method paths embed package+service — so a foreign stub gets
+// UNIMPLEMENTED even against a wire-identical peer. Every signals engine registers THIS service
+// ADDITIONALLY, beside its native one: the native service stays the project-internal surface; this
+// is the federation face. One stub, any engine.
+//
+// Design rules:
+//   * additive-only within v1 — new fields get new numbers, nothing is renamed or renumbered;
+//   * capabilities, not models — `capability` names an ability ("instruct", "referee"); the serving
+//     engine chooses and reports the model;
+//   * reasoning retention — thinking traces are a corpus value-add and ride reasoning_content
+//     (or inline in text when the model/parser doesn't separate them), never silently dropped;
+//   * engine-private details (internal vLLM ports, log paths) do NOT cross this boundary.
+//
+// Patterned after the KServe Open Inference Protocol repository (spec + proto, versioned dirs);
+// OIP itself remains the horizon peer protocol for heterogeneous serving stacks — see README.
+
+syntax = "proto3";
+package zndx.engine.v1;
+
+service Engine {
+  // Request an inference CAPABILITY. The engine selects/ensures the model and serves internally;
+  // the caller never sees a model endpoint.
+  rpc Complete(CompleteRequest) returns (CompleteResponse);
+  // The federation-facing status surface: what capabilities this engine serves, on which GPUs.
+  rpc Status(StatusRequest) returns (StatusResponse);
+  // Adapt to a boundary SIGNAL (Holland CAS / Signals & Boundaries). A membrane or reasoner DETECTED an
+  // adaptive-pressure event (a fictional external reference, an unsatisfiable class, version drift) and
+  // propagates it here with LIVE context; the engine's agent REASONS over it and returns a proposed
+  // correction. The correction lives in the agent's ADAPTATION, never a static rule at the boundary.
+  // STRICT LAYERING: the engine serves only the adaptive inference — the boundary that RAISED the signal,
+  // and the membrane that DISPOSES the correction + re-prompts, stay with the CALLER. Federable: Atelier's
+  // boundaries can raise signals across this face and any signals engine can serve the adaptation.
+  // (added 2026-07-11, aegir — the external-namespace remediation loop; additive v1.)
+  rpc Remediate(RemediationRequest) returns (RemediationResponse);
+  // C2 (or a later NiFi processor) tells the owning engine to end the local
+  // process that a YK-admitted sentinel Application represents. Sentinels
+  // never call this; they speak MiNiFi C2 HTTP to the C2 server, which is a
+  // gRPC client of this RPC.
+  rpc Yield(YieldRequest) returns (YieldResponse);
+  // Server-to-server snapshot query (Matrix S2S Queries, not epidemic gossip
+  // and not CZMQ zgossip). Pairwise request/response: remotes, schedules,
+  // known peers, notes, advertised surfaces.
+  // (added 2026-08-16, gaius — additive v1.)
+  rpc ServerQuery(ServerQueryRequest) returns (ServerQueryResponse);
+  // Persist a runtime lineage event to the Signals SoR (Atlas OpenLineage).
+  // Producers (Metaflow, Flink, peers) MUST NOT write a private catalog.
+  // (added 2026-08-19, gaius — additive v1.)
+  rpc RecordLineage(LineageRequest) returns (LineageResponse);
+  // Held-open stream of this engine's INTENDED workload profile — what it MEANS to
+  // be serving right now, with each intent's ACTUAL status alongside. The engine
+  // emits the current SETTLED profile immediately, re-emits phase=TRANSITIONING
+  // just before it changes the serving set (evict/admit/restore), then a new
+  // SETTLED profile once the change lands, plus a periodic heartbeat. An out-of-band
+  // watchdog compares desired-vs-actual ONLY while SETTLED (and past each intent's
+  // warmup) so a changeover never reads as failure, and recycles the unit — which
+  // the engine cannot do to itself — on a sustained settled mismatch. There is
+  // ALWAYS a profile while the engine is alive (empty intents = intentionally
+  // serving nothing). (added 2026-08-30, gaius — additive v1.)
+  rpc WatchWorkload(WatchWorkloadRequest) returns (stream WorkloadProfile);
+  // Join the federation directory: the caller asks THIS engine to remember a
+  // PeerHint (lattice Engine host:port) until ttl_seconds elapses. Launchers
+  // stay pull-only (ServerQuery PEERS, then Status.surfaces). This is the
+  // Matrix-style join — not gossip, not a peer-contract edit. Engines that
+  // are not a directory answer UNIMPLEMENTED (honest).
+  // (added 2026-09-04, aegir — additive v1.)
+  rpc Announce(PeerAnnounce) returns (AnnounceAck);
+  // Create (or refresh) one Agenda item on the engine that HOLDS the Agenda
+  // (Gaius). Other engines answer UNIMPLEMENTED. The caller is a lattice
+  // engine + named agent/profile (Hermes Ripley, Hermes Grok, Metabase Metabot).
+  // Gaius writes the calendar zettel only. origin_project is the CALLER
+  // engine (hermes when Ripley/Grok create). Session material BYTES are
+  // NOT in this RPC — rustfs + RESOURCES. Attachment POINTERS may ride
+  // item.attachments when attachments_allowed (SHACL upper bound).
+  // session_prompt / session_materials (fields 16/17) are deprecated.
+  // (added 2026-09-19; attachments 2026-09-20 — additive v1.)
+  rpc PutAgendaItem(PutAgendaItemRequest) returns (PutAgendaItemResponse);
+}
+
+// The KIND of adaptive pressure a boundary detected. Additive-only: new kinds get new numbers.
+enum SignalKind {
+  SIGNAL_KIND_UNSPECIFIED = 0;
+  EXTERNAL_NAMESPACE_VIOLATION = 1; // a cco:/bfo:/fhir: reference that does NOT exist in the current authority
+  UNSATISFIABLE = 2;                // the reasoner entails the artifact can have no instances (disjointness/domain-range)
+  UNGROUNDED = 3;                   // no entailed path to a required upper ontology (BFO/CCO)
+  VERSION_DRIFT = 4;                // a real-but-SUPERSEDED IRI (legacy → current; e.g. bfo:0000052 → bfo:0000197)
+  TX_ID_NOT_UUIDV7 = 5;             // warehouse tx_id is not RFC 9562 UUID version 7; source remints
+}
+
+// A live entry from the current authority — CONTEXT for the agent to reason over, NOT a mapping to apply.
+message Candidate {
+  string iri = 1;                   // the real IRI (e.g. cco:ont00000965)
+  string label = 2;                 // its authoritative label ("Prescriptive Information Content Entity")
+  string kind = 3;                  // class | objectproperty | dataproperty
+  float score = 4;                  // relevance from the live query (0 = exact/unranked)
+}
+
+// What the boundary detected — the signal itself.
+message BoundarySignal {
+  SignalKind kind = 1;
+  string subject = 2;               // the artifact under pressure (e.g. the full Manchester axiom)
+  string offending = 3;             // the specific token/reference that tripped the boundary
+  string reason = 4;                // the boundary's human-legible justification
+  string authority = 5;             // the authority + VERSION checked against (e.g. "CCO 2026-04-04", "BFO 2020")
+}
+
+// The live ENVIRONMENT the agent reasons over — queried at signal time, never baked.
+message SignalContext {
+  repeated Candidate candidates = 1; // live query of the current authority for plausible real entities
+  repeated string justification = 2; // e.g. the minimal disjointness / domain-range axioms for an UNSATISFIABLE
+  repeated Candidate anchors = 3;    // domain grounding anchors (the retrieval signal)
+  repeated string rules = 4;         // the invariants ("external namespaces may not be coined; coin only sdg:")
+}
+
+message RemediationRequest {
+  string capability = 1;            // names the ability, e.g. "reauthor" — not a model
+  BoundarySignal signal = 2;
+  SignalContext context = 3;
+  int32 max_tokens = 4;
+  float temperature = 5;
+}
+
+// The agent's SELF-ASSESSED disposition; the caller's membrane still verifies the correction.
+enum Disposition {
+  DISPOSITION_UNSPECIFIED = 0;
+  CORRECTED = 1;                    // re-authored with a real external IRI from the authority
+  COINED_LOCAL = 2;                 // coined in the caller's own namespace (sdg:) — no real external fit exists
+  UNRESOLVABLE = 3;                 // the agent cannot form a valid correction (escalate)
+}
+
+message RemediationResponse {
+  string correction = 1;            // the re-authored artifact (e.g. the corrected Manchester axiom)
+  Disposition disposition = 2;
+  string rationale = 3;             // the agent's reasoning for the correction (auditable)
+  string model = 4;
+  string reasoning_content = 5;
+  int32 completion_tokens = 6;
+  float latency_ms = 7;
+}
+
+message CompleteRequest {
+  string capability = 1;      // names an ability, not a model
+  string prompt = 2;
+  string system_prompt = 3;
+  int32 max_tokens = 4;
+  float temperature = 5;
+  // Optional JSON Schema (as a JSON string) for engine-enforced structured output (e.g. vLLM
+  // guided-json). Empty = unconstrained. Present from v1's birth so federated calls keep schema
+  // enforcement across engines.
+  string json_schema = 6;
+  // Browser / operator IANA zone (e.g. America/Denver). Empty = unspecified.
+  string timezone = 7;
+  // Optional JSON Clock (today / tomorrow / tomorrow_morning as UTC instants).
+  string clock_json = 8;
+  // OpenAI tools[] as a JSON array. Empty = no tools (text-only Complete).
+  // When set, the engine forwards them to the local OpenAI-compatible
+  // backend so the capability emits native tool_calls instead of prose.
+  string tools_json = 9;
+  // OpenAI tool_choice: "auto" | "required" | "none", or a named-tool JSON
+  // object. Empty defaults to "auto" whenever tools_json is set.
+  string tool_choice = 10;
+  // Full OpenAI messages[] as a JSON array, replacing prompt/system_prompt
+  // for message construction. A multi-turn tool loop MUST use this: flattening
+  // assistant tool_calls and tool results into one prompt string loses the
+  // pairing the chat template needs, and the model re-issues calls it has
+  // already made. Empty keeps the prompt/system_prompt pair.
+  string messages_json = 11;
+  // A capability SET the engine must satisfy TOGETHER: at most ONE method
+  // capability (an optillm technique class, e.g. "cot_reasoning") plus at
+  // most ONE model capability (e.g. "thinking"). The engine plans the
+  // fulfilment (method → technique, model → served endpoint) or fails fast
+  // with FAILED_PRECONDITION #EP.00000020.NOMIX listing the offered
+  // models × methods. Empty = the legacy single `capability` field.
+  // Vocabulary: specification/protocol/capabilities.md.
+  // (added 2026-08-30, gaius — additive v1.)
+  repeated string capabilities = 12;
+}
+
+// One structured tool call the ENGINE parsed from the model's output — so a
+// client never parses <tool_call> markup itself (Engine-First). Populated whether
+// the backend used a native tool parser or the engine extracted the markup.
+message ToolCall {
+  string id = 1;              // provider call id; empty if the backend gave none
+  string name = 2;            // tool name (e.g. "gaius__fmp_search")
+  string arguments_json = 3;  // arguments as a JSON object, serialized to a string
+}
+
+// One reasoning layer a fulfilment produced: the model's native separated
+// chain-of-thought (layer="model") and/or the method's scaffold — e.g.
+// cot_reflection's <thinking>/<reflection> block (layer="method"). Reasoning
+// traces are corpus value-adds in this federation: retained, never dropped.
+// (added 2026-08-30, gaius — additive v1.)
+message ReasoningLayer {
+  string layer = 1;     // "model" | "method"
+  string producer = 2;  // e.g. "Qwen/Qwen3.8-27B" or "cot_reflection@engine"
+  string text = 3;      // the verbatim trace
+  int32 tokens = 4;     // best-effort share of completion tokens; 0 = unknown (honest)
+}
+
+message CompleteResponse {
+  string text = 1;                // the answer; reasoning inline here when not separated
+  string model = 2;               // the model the engine actually served the capability with
+  int32 prompt_tokens = 3;
+  int32 completion_tokens = 4;
+  float latency_ms = 5;
+  string reasoning_content = 6;   // separated chain-of-thought when available; empty otherwise
+  string finish_reason = 7;       // "stop" (complete) vs "length" (truncated — raise max_tokens)
+  // Structured tool calls the engine parsed. Clients consume these directly;
+  // during the cutover `text` may also still carry the <tool_call> markup.
+  repeated ToolCall tool_calls = 8;
+  // Every reasoning layer the fulfilment produced, in order (model layer
+  // first when present). Populated on capabilities[] requests.
+  // (added 2026-08-30, gaius — additive v1.)
+  repeated ReasoningLayer reasoning = 9;
+  // How the engine fulfilled the request, e.g.
+  // "cot_reflection@engine/Qwen3.8-27B@vllm:8081". Empty on the legacy path.
+  // (added 2026-08-30, gaius — additive v1.)
+  string fulfilled_by = 10;
+  // The operating profile the serving engine ALIGNED to for this request (the
+  // requested capability's thinking/effort), so a warehouse row can record how the
+  // reasoning layer was produced. Unset on the legacy path.
+  // (added 2026-09-08 — additive v1.)
+  OperatingProfile profile = 11;
+}
+
+message StatusRequest {}
+
+message Endpoint {
+  string capability = 1;
+  string model = 2;
+  bool healthy = 3;
+  repeated int32 gpu_ids = 4;     // which local GPUs this capability pins (lease visibility)
+  string detail = 5;
+}
+
+message StatusResponse {
+  string project = 1;             // "aegir" | "atelier" | "gaius" — who answered
+  repeated Endpoint endpoints = 2;
+  int32 total_gpus = 3;
+  // Product surfaces this engine advertises. Empty = none (honest).
+  repeated Surface surfaces = 4;
+}
+
+message Surface {
+  string kind = 1;
+  string url = 2;
+  bool healthy = 3;
+}
+
+// Why C2 is asking the engine to drop a host process.
+enum YieldReason {
+  YIELD_REASON_UNSPECIFIED = 0;
+  YIELD_REASON_PREEMPTED = 1;  // YK ended the sentinel Application
+  YIELD_REASON_COMPLETED = 2;  // work done; drop coupling
+  YIELD_REASON_ORPHAN = 3;     // heartbeat lost / no last-gasp
+  YIELD_REASON_UNIT_STOP = 4;  // peer-scoped unit stop
+}
+
+message YieldRequest {
+  string workload_id = 1;   // shared key: YK app / C2 agent / OTel
+  YieldReason reason = 2;
+  string sentinel_id = 3;
+  string detail = 4;
+}
+
+message YieldResponse {
+  bool ok = 1;
+  bool process_ended = 2;
+  bool restore_started = 3;  // evict/restore plan if the engine had one
+  string message = 4;
+}
+
+// What a ServerQuery asks for. Additive-only.
+enum ServerQueryKind {
+  SERVER_QUERY_KIND_UNSPECIFIED = 0;
+  SERVER_QUERY_KIND_REMOTES = 1;     // named git remotes of this project
+  SERVER_QUERY_KIND_SCHEDULES = 2;   // pg_cron / Airflow catalog hints
+  SERVER_QUERY_KIND_PEERS = 3;       // configured lattice + live Announce'd peers
+  SERVER_QUERY_KIND_NOTE = 4;        // one FedWiki page by note_id (fork source)
+  SERVER_QUERY_KIND_SURFACES = 5;    // advertised primary UIs (this engine)
+  SERVER_QUERY_KIND_QUEUES = 6;      // declared YK leaves this engine needs
+  SERVER_QUERY_KIND_WORKLOADS = 7;   // WRK model + capabilities + tp/pp (not queue names)
+  SERVER_QUERY_KIND_SOURCE_POSTURE = 8;  // what code the peer is actually running (SourcePosture)
+  SERVER_QUERY_KIND_PRODUCTS = 9;        // federated data products this peer publishes
+  SERVER_QUERY_KIND_COGNITION = 10;      // a peer's cognition overview (thought/cycle buckets)
+  SERVER_QUERY_KIND_CONTRIBUTIONS = 11;  // a peer's contributions by source and workflow (ProductHint)
+  SERVER_QUERY_KIND_ACTIVITIES = 12;     // coordination Activities this engine knows (its own + peers', as learned from Signals)
+  SERVER_QUERY_KIND_THOUGHTS = 13;       // recent THOUGHTS of this engine's cognition — content, not counts (added 2026-09-07)
+  SERVER_QUERY_KIND_AGENDA = 14;         // the AGENDA brief (today · tomorrow · the week) + item index; note_id = one item (added 2026-09-07)
+  SERVER_QUERY_KIND_SEARCH = 15;         // KB and/or web hits; query= the string, stream= kb|web|all (added 2026-09-08)
+  SERVER_QUERY_KIND_AGENTS = 16;         // agents this engine HOSTS (AgentHint[]); full offers: zndx.agent.v1.Agents/ListAgents (added 2026-09-09)
+  SERVER_QUERY_KIND_FMP = 17;            // live Financial Modeling Prep; key stays on Gaius. query=symbol/string, stream=search|quote|news|… (added 2026-09-21)
+  SERVER_QUERY_KIND_RESOURCES = 18;      // origin-project session materials (rustfs /<project>/resources/<note_id>/). note_id = agenda item id. Connect-time only. (added 2026-09-19)
+  // 19 is fmp_hint on ServerQueryResponse.
+  SERVER_QUERY_KIND_ASPECTS = 20;        // shapes graph: AspectSpec[] + ProductSpec[] (SHACL Core). Discovery only. (added 2026-09-20)
+}
+
+message GitRemote {
+  string name = 1;
+  string url = 2;
+}
+
+message PeerHint {
+  string project = 1;
+  string target = 2;    // host:port of the peer's lattice Engine
+}
+
+// A project's WORKLOAD CATALOGUE entry (added fields 2026-09-07 — additive v1).
+// An engine publishes one per scheduled class (ServerQuery kind=SCHEDULES) and
+// SUBMITS the same to Signals (Scheduler/SyncWorkloads). Signals materialises
+// each enabled entry as an Airflow DAG (`airflow_dag_id`) whose runs are
+// Activities: the run's `hold` observes the owner's lease while the owner
+// engine runs the class, and Signals asserts `claims` into the arbiter for the
+// run's duration — the workload's YuniKorn configuration applied exactly while
+// the workload is active. Ordering is Airflow's: `after` names catalogue ids
+// whose ended Asset schedules this one (instead of, or in addition to, `cron`).
+// Metaflow flows, scheduled tasks and the interactive agent-rtc workflow are
+// all catalogue entries; `source` says who runs it and how it is declared.
+message ScheduleHint {
+  string id = 1;                       // catalogue id, e.g. task.article_curate
+  string cron = 2;                     // schedule (project-local tz); empty = unscheduled (asset- or engine-declared)
+  string airflow_dag_id = 3;           // materialised DAG (Signals assigns <peer>_<kind> when empty)
+  string source = 4;                   // pg_cron | airflow | engine (declared by the engine itself, e.g. interactive_session)
+  bool enabled = 5;                    // false = catalogued but paused in Airflow
+  string kind = 6;                     // activity kind the owner engine starts (article_curate, interactive_session, …)
+  repeated ActivityClaim claims = 7;   // the workload's YK queue configuration while it runs
+  repeated string precludes = 8;       // leaves peers must not admit into while it runs
+  map<string, string> postures = 9;    // "<project>.endpoint.<alias>" → "hold-uptime", …
+  int32 horizon_s = 10;                // outer bound of one run (the sensor's timeout base)
+  repeated string after = 11;          // catalogue ids this workload follows (Asset-scheduled)
+  string timezone = 12;                // IANA tz for `cron` (empty = UTC)
+  string description = 13;             // human, shown in the DAG
+  string runner = 14;                  // metaflow | task | endpoint | interactive — how the owner runs it
+  // How `after` schedules this workload (added 2026-09-07): "all" (default) =
+  // run when EVERY named workload has ended since the last run (Airflow
+  // AssetAll); "any" = run when ANY one of them ends (AssetAny) — the shape of
+  // a digest such as a project's agenda brief, refreshed whenever a producer
+  // (a publish slot, a prospects update, a cognition cycle) finishes. With
+  // `cron` also set, the schedule is time OR assets (AssetOrTimeSchedule): the
+  // digest rolls over at the day boundary even when nothing was produced.
+  string after_mode = 15;
+}
+
+message WikiNote {
+  string id = 1;
+  string title = 2;
+  string body = 3;
+  repeated string links = 4;
+  string origin_project = 5;
+}
+
+// ── Source posture: what code a peer is actually running ───────────────────
+// Answered for kind=SOURCE_POSTURE. Every field is best-effort and honest:
+// absent/zero means "not reported", so a light peer (e.g. Metabase) can adopt
+// incrementally and be skipped until it does — same graceful path as REMOTES.
+
+// One submodule's posture. pinned_sha is the superproject gitlink (what the
+// parent commit references); checked_out_sha is what is on disk. They diverge
+// when the submodule is moved off its pin.
+message SubmodulePosture {
+  string path = 1;             // submodule path within the superproject
+  string name = 2;             // configured submodule name
+  string pinned_sha = 3;       // superproject gitlink (git ls-tree HEAD <path>)
+  string checked_out_sha = 4;  // commit actually checked out on disk
+  bool dirty = 5;              // submodule working tree has uncommitted changes
+}
+
+// Migration backlog for one source; a peer may report several (dbmate, alembic…).
+message MigrationPosture {
+  string source = 1;           // "dbmate" | "alembic" | "flyway" | ...
+  string current = 2;          // latest applied migration id (empty if none)
+  repeated string unapplied = 3; // migration ids present but not applied
+}
+
+// A peer's source posture — what code the live engine is actually running,
+// distinct from the checkout tip. head is read live; running_sha is stamped once
+// at engine start, so a long-lived process reveals when the tree moved under it.
+message SourcePosture {
+  string project = 1;          // who this posture is for
+  string checkout = 2;         // host-local checkout path (may be empty; honest)
+  string branch = 3;           // current branch, empty if detached
+  string head = 4;             // checkout tip (git rev-parse HEAD)
+  string running_sha = 5;      // commit the LIVE process started from
+  bool dirty = 6;              // superproject working tree has uncommitted changes
+  string upstream = 7;         // tracking ref, e.g. "origin/trunk"; empty if none
+  int32 ahead = 8;             // commits ahead of upstream
+  int32 behind = 9;            // commits behind upstream
+  repeated SubmodulePosture submodules = 10;
+  repeated MigrationPosture migrations = 11;
+}
+
+message ServerQueryRequest {
+  ServerQueryKind kind = 1;
+  int32 ttl = 2;
+  string nonce = 3;
+  string origin_project = 4;
+  string note_id = 5;
+  int32 limit = 6;        // kind=THOUGHTS: max thoughts (serving engine caps; 0 = its default)
+  int64 since_ms = 7;     // kind=THOUGHTS: only thoughts at or after this unix ms (0 = serving-engine window)
+  string stream = 8;      // kind=THOUGHTS: thought kind filter; kind=SEARCH: kb | web | all ("" = all)
+  string query = 9;       // kind=SEARCH: the search string
+}
+
+message ServerQueryResponse {
+  string project = 1;
+  repeated GitRemote remotes = 2;
+  string head = 3;
+  repeated PeerHint peers = 4;
+  repeated ScheduleHint schedules = 5;
+  WikiNote note = 6;
+  repeated Surface surfaces = 7;
+  repeated QueueHint queues = 8;      // kind=QUEUES
+  repeated WorkloadOffer workloads = 9;  // kind=WORKLOADS
+  SourcePosture posture = 10;         // kind=SOURCE_POSTURE
+  repeated ProductHint products = 11; // kind=PRODUCTS
+  CognitionHint cognition = 12;       // kind=COGNITION (added 2026-08-31, gaius — additive v1.)
+  ContributionsHint contributions = 13; // kind=CONTRIBUTIONS (added 2026-08-31, gaius — additive v1.)
+  repeated Activity activities = 14;  // kind=ACTIVITIES (added 2026-09-06 — additive v1.)
+  ThoughtsHint thoughts_hint = 15;    // kind=THOUGHTS (added 2026-09-07 — additive v1.)
+  AgendaHint agenda_hint = 16;        // kind=AGENDA (added 2026-09-07 — additive v1.)
+  SearchHint search_hint = 17;        // kind=SEARCH (added 2026-09-08 — additive v1.)
+  repeated AgentHint agents = 18;     // kind=AGENTS (added 2026-09-09 — additive v1.)
+  FmpHint fmp_hint = 19;              // kind=FMP (added 2026-09-21 — additive v1; uses the reserved 19 hole)
+  ResourcesHint resources_hint = 20;  // kind=RESOURCES (added 2026-09-19 — additive v1)
+  repeated AspectSpec aspect_catalog = 21;  // kind=ASPECTS — shapes graph (added 2026-09-20)
+  repeated ProductSpec product_specs = 22;  // kind=ASPECTS — product specifications (added 2026-09-20)
+}
+
+// ── Agents (added 2026-09-09 — additive v1) ───────────────────────────────
+//
+// DISCOVERY of the agents a peer HOSTS — the bounded assemblages (runtime + tools +
+// workspace + the model capability they think with) that zndx.agent.v1 runs. Light on
+// purpose: zndx.agent.v1.Agents/ListAgents is the full offer. An engine that does not
+// host an agent MUST NOT list it. Empty is honest.
+message AgentHint {
+  string agent_id = 1;                    // {project}/{name}@{version}
+  string project = 2;
+  string name = 3;
+  string version = 4;
+  string transport = 5;                   // acp | sdk | cli | engine (zndx.agent.v1.AgentTransport, as text)
+  repeated string model_capabilities = 6; // what it can think with; empty = brings its own model
+  string billing = 7;                     // local | subscription | token-metered
+}
+
+// ── Search (added 2026-09-08 — additive v1) ───────────────────────────────
+//
+// "Look that up" — KB notes and/or the public web, served by the peer that
+// owns the store (Gaius KB + Brave). Two hops; empty hits plus `note` is
+// honest (key missing, idle, no matches). stream= kb | web | all.
+message SearchHit {
+  string title = 1;
+  string url = 2;          // wiki path (kb) or https (web)
+  string snippet = 3;
+  string source = 4;       // kb | web
+  float score = 5;
+}
+
+message SearchHint {
+  string project = 1;
+  string query = 2;
+  string stream = 3;       // kb | web | all as served
+  repeated SearchHit hits = 4;
+  string note = 5;         // honest state when empty
+}
+
+// ── FMP (added 2026-09-21 — additive v1) ───────────────────────────────────
+//
+// Live Financial Modeling Prep. The API key stays on Gaius. Hermes / AgentRTC
+// hop here over ServerQuery. Empty hits plus `note` is honest (no key, rate
+// limit, no matches). stream = search|quote|news|filings|statement|metrics|
+// calendar|employees|eight_k|insider|profile|eod.
+message FmpHit {
+  string symbol = 1;
+  string title = 2;
+  string snippet = 3;
+  string url = 4;
+  string exchange = 5;
+  string as_of = 6;
+  string source = 7;
+}
+
+message FmpHint {
+  string project = 1;
+  string query = 2;
+  string stream = 3;
+  repeated FmpHit hits = 4;
+  string note = 5;
+  string spoken = 6;
+}
+
+// ── Agenda (added 2026-09-07 — additive v1) ───────────────────────────────
+//
+// The same paradigm as THOUGHTS, for the project's Agenda: a BRIEF the
+// project's own workflow writes on a cadence — the gist of TODAY, and a
+// judgement of what from TOMORROW and the COMING WEEK matters (sessions by
+// start time, reminders by open checks and pins, briefs by recency) in the
+// operator's timezone, saying plainly when a day is empty — plus the INDEX of
+// the items it covered so a conversational agent can follow up: ask again
+// with `note_id = <item id>` and the response carries that one item in full.
+// Two hops, never one; the project's Agenda notes remain the deep surface.
+message AgendaHintItem {
+  string id = 1;                   // the item's stable id (its note path in the project)
+  int64 starts_ms = 2;             // events: start (0 = undated item)
+  int64 ends_ms = 3;
+  string kind = 4;                 // note | list | event
+  string intent = 5;               // brief | reminder | session
+  string title = 6;
+  string summary = 7;              // ≤ ~300 chars
+  repeated string tags = 8;
+  bool pinned = 9;
+  int32 open_checks = 10;          // reminder lists: unchecked items
+  string with_whom = 11;
+  string body = 12;                // ONLY on a single-item query (note_id set); bounded by the serving engine
+  int64 created_ms = 13;
+  string day = 14;                 // today | tomorrow | week | past | later — the brief's bucket for it
+  // Hosting lattice engine (`gaius`, `metabase`, …) — not the agent name.
+  // Metabase holds Metabot; origin_project is `metabase`. AgentRTC Connect
+  // ServerQuerys THAT engine for session_prompt / session_materials rather
+  // than assuming the first answering peer. Empty = serving `AgendaHint.project`.
+  // (added 2026-09-19 — additive v1.)
+  string origin_project = 15;
+  // Optional novel prompt for an AgentRTC Connect invent pass. Distinct from
+  // body, presenterm deck, and speaker notes. Empty = the caller uses its
+  // default calendar-session opening. Filled by the owning workflow when it
+  // has one. (added 2026-09-19 — additive v1.)
+  string session_prompt = 16;
+  // Supporting notes for the voice session, not the deck / speaker_notes /
+  // public lede. Empty is honest. (added 2026-09-19 — additive v1.)
+  string session_materials = 17;
+  // Named agent/profile that asked Gaius to create this item (`ripley`,
+  // `grok`, `metabot`, `hermes`, …). Empty = unattributed. (added 2026-09-19.)
+  string origin_agent = 18;
+  // Session-prompt / materials TEXT (16, 17) is deprecated. Do not set on
+  // new writes. Pointers live here; bytes live on rustfs and are fetched
+  // via RESOURCES. (added 2026-09-20 — additive v1.)
+  repeated Attachment attachments = 19;
+  bool attachments_allowed = 20;  // capability, upper bound (SHACL can_have_attachment)
+}
+
+message AgendaHint {
+  string project = 1;
+  string brief = 2;                // written form (Agenda framing, ≤ ~1400 chars)
+  string spoken = 3;               // plain speech for a voice agent (≤ ~800 chars)
+  int64 brief_at_ms = 4;           // 0 = no brief yet (note says when the next one is due)
+  string brief_id = 5;
+  string timezone = 6;             // IANA zone the brief speaks in
+  string today = 7;                // YYYY-MM-DD in that zone, as the brief saw it
+  repeated AgendaHintItem items = 8;   // the index the brief covered (today · tomorrow · week), newest-relevant first
+  AgendaHintItem item = 9;         // the one item asked for (note_id), with body
+  int32 total_in_window = 10;
+  string note = 11;                // honest state: "no brief yet — next at …", "item not found", "agenda empty"
+}
+
+// PutAgendaItem — write one item onto the Agenda holder (Gaius). Additive v1 2026-09-19.
+message PutAgendaItemRequest {
+  string origin_project = 1;       // caller engine: hermes | metabase | gaius
+  string origin_agent = 2;         // named profile/agent: ripley | grok | metabot | hermes
+  AgendaHintItem item = 3;         // title required; id empty = Gaius assigns scratch path
+}
+
+message PutAgendaItemResponse {
+  bool ok = 1;
+  AgendaHintItem item = 2;         // as stored (id = note path)
+  string note = 3;                 // guru on failure; empty on success
+}
+
+// Connect-time session materials from the ORIGIN engine's object store
+// (rustfs `s3://<project>/resources/<note_id>/…`). Not the Agenda zettel.
+// Empty objects + note is honest. (added 2026-09-19 — additive v1.)
+message ResourceObject {
+  string name = 1;                 // prompt.md | materials.md | …
+  string text = 2;                 // utf-8 body when the object is text
+  string uri = 3;                  // s3://hermes/resources/<id>/prompt.md
+}
+
+// Thin-wire pointer on an Agenda item. Bytes stay in object storage.
+// role: prompt | materials | other. Empty list + attachments_allowed=true
+// is valid (holding). attachments_allowed=false + nonempty is a
+// MaxCountConstraintComponent violation. (added 2026-09-20 — additive v1.)
+message Attachment {
+  string name = 1;
+  string uri = 2;                  // s3://<origin_project>/resources/<note_id>/<name>
+  string role = 3;                 // prompt | materials | other
+  string media_type = 4;           // e.g. text/markdown; charset=utf-8
+}
+
+message ResourcesHint {
+  string project = 1;
+  string note_id = 2;              // agenda item id (Gaius scratch path)
+  repeated ResourceObject objects = 3;
+  string note = 4;                 // honest empty
+}
+
+// ── Thoughts (added 2026-09-07 — additive v1) ─────────────────────────────
+//
+// "What have you been thinking about?" — the day-one question. CognitionHint
+// (kind=COGNITION) is the overview: counts and buckets. THOUGHTS is the
+// CONTENT: the serving engine's most recent persisted thoughts, bounded and
+// newest first, so a peer's agent (the Hermes voice loop, another project's
+// briefing) can talk about them in its own words. Two hops, never one: a
+// local process asks its local engine, which asks the peer engine. The
+// serving engine caps limit and text lengths; nothing here is a search —
+// the peer's own UI / KB remains the deep surface.
+message Thought {
+  string id = 1;
+  int64 at_ms = 2;                 // when it was thought (created)
+  string kind = 3;                 // thought_type: pattern | connection | question | reflection | audit | …
+  string title = 4;
+  string summary = 5;              // ≤ ~600 chars, the serving engine's own summary
+  string excerpt = 6;              // ≤ ~1200 chars of the content (empty when summary suffices)
+  repeated string domains = 7;     // KB domains / topics it draws on
+  double salience = 8;             // 0..1 as the generator scored it
+  string chain_id = 9;             // thought_chain_id — follow a line of thought
+  int32 generation = 10;           // position in its chain (0 = a root thought)
+  string note_path = 11;           // KB note that persisted it (peer-local path)
+  string profile = 12;             // cognition profile that produced it
+  string model = 13;               // generator model
+}
+
+message ThoughtsHint {
+  string project = 1;
+  repeated Thought thoughts = 2;   // newest first
+  int32 total_in_window = 3;       // how many exist in the window (thoughts[] may be fewer)
+  int64 newest_ms = 4;             // newest thought in the store (0 = none)
+  int64 window_ms = 5;             // the window the serving engine applied
+  int32 cycles_in_window = 6;      // cognition cycles that ran in the window
+  string note = 7;                 // honest state: "cognition idle since …", "store empty", …
+  // The Thoughts BRIEF (added 2026-09-07): written by the cognition cycle itself
+  // as part of its normal workflow, in the Agenda Brief framing — what is on the
+  // mind, the lines of thought, the connections, the open questions — so the
+  // answer to "what have you been thinking about?" is ready before the question
+  // arrives. `spoken` is the plain-speech form for a voice agent (no markdown,
+  // no links); `brief` is the written form. Empty = no brief yet (the note says
+  // when the next cycle is due); a peer never invents one.
+  string brief = 8;
+  string spoken = 9;
+  int64 brief_at_ms = 10;
+  string brief_id = 11;
+  int32 brief_thoughts = 12;       // how many thoughts the brief considered
+}
+
+// ── Coordination Activities (added 2026-09-06 — additive v1) ─────────────
+//
+// An Activity is inter-project INTENT WITH A LIFETIME: "the interactive
+// session owns agent-rtc for the next hour; gaius, do not chase your thinking
+// uptime meanwhile". It is materialised as a run of a Signals-owned Airflow
+// DAG in the shared Signals Airflow — the federation's coordination surface —
+// so it has an owner, a reason, a state machine, a history, a UI, and a place
+// in every project's Backlog.
+//
+// TOPOLOGY (two hops, never one): a project's LOCAL processes (flows, an
+// interactive session, its Nautilus) speak only to their LOCAL engine; the
+// federated ENGINES speak to the Signals engine over
+// zndx.scheduler.v1.Scheduler (Declare/Renew/Release/List/Watch); ONLY the
+// Signals engine speaks to Airflow. Engines re-expose what they learn here
+// (ServerQuery kind=ACTIVITIES) and on zndx.supervision.v1 (ActivityEvent).
+//
+// SEMANTICS peers agree on:
+//   claims     — the workload's YK queue configuration: while the activity is
+//                RUNNING, Signals asserts each claim into the arbiter as a
+//                queue-share intent (floor = gpu on leaf) and retracts it when
+//                the run ends; a refused assertion is surfaced in `note`
+//   precludes  — YK leaf FQNs peers must NOT admit new work into while RUNNING
+//   postures   — "<project>.endpoint.<alias>" → "hold-uptime": that project
+//                cedes the endpoint's intent (no restart chase, no unit recycle)
+//                until the activity ends; other keys are additive vocabulary
+//   horizon    — the run's own timeout; the owner renews (a new run, same
+//                activity_id) or releases; expiry is a release by absence
+enum ActivityState {
+  ACTIVITY_STATE_UNSPECIFIED = 0;
+  ACTIVITY_QUEUED = 1;      // declared; the run has not started yet (intent NOT yet in force)
+  ACTIVITY_RUNNING = 2;     // intent in force
+  ACTIVITY_RELEASED = 3;    // the owner released it before the horizon
+  ACTIVITY_EXPIRED = 4;     // the horizon passed without release or renewal
+  ACTIVITY_FAILED = 5;      // the run failed — intent NOT in force
+  ACTIVITY_SUPERSEDED = 6;  // renewed: a later run carries the same activity_id
+}
+
+message ActivityClaim {
+  string leaf = 1;          // YK leaf FQN, e.g. root.internal.inference.agent-rtc
+  int32 gpu = 2;            // federation.zndx.org/gpu tokens (0 = none / token-metered)
+}
+
+message Activity {
+  string activity_id = 1;   // stable across renewals (Signals-minted uuidv7)
+  string kind = 2;          // interactive_session | curation_window | restart_window | maintenance_pause | …
+  string peer = 3;          // declaring engine's project (hermes, gaius, …)
+  string owner = 4;         // the declarer within the peer (session id, process id)
+  string dag_id = 5;        // the Signals Airflow DAG carrying it (coord_activity)
+  string run_id = 6;        // the CURRENT dag run (changes on renewal)
+  ActivityState state = 7;
+  int64 declared_ns = 8;    // unix ns of the first declaration
+  int64 horizon_ns = 9;     // intent expires here unless renewed or released
+  int64 renewed_ns = 10;    // 0 = never renewed
+  int64 ended_ns = 11;      // 0 while in force
+  repeated ActivityClaim claims = 12;
+  repeated string precludes = 13;
+  map<string, string> postures = 14;
+  string reason = 15;       // human: why the activity exists
+  string note = 16;         // Signals-written outcome ("released by hermes: hangup", "renewed → run …")
+}
+
+// A peer's cognition OVERVIEW — discovery only, at a serving-engine-chosen
+// window (~30d): running state, thought/cycle totals, coarse activity
+// buckets, and stream mix. The peer's own UI is the deep surface. A peer
+// without a cognition unit leaves the hint unset — honest, never an error.
+// (added 2026-08-31, gaius — additive v1.)
+message CognitionActivityBucket {
+  int64 start_ms = 1;   // half-open [start_ms, end_ms)
+  int64 end_ms = 2;
+  int32 thoughts = 3;
+  int32 cycles = 4;
+}
+
+message CognitionStreamHint {
+  string id = 1;        // thought stream (type), e.g. pattern | curiosity
+  int32 thoughts = 2;
+}
+
+message CognitionHint {
+  string project = 1;
+  string unit = 2;               // e.g. "cognition"
+  bool running = 3;
+  int32 thoughts = 4;            // window total
+  int32 cycles = 5;
+  int64 last_cycle_ms = 6;
+  string interval = 7;           // bucket unit served (hour|6h|day|week|month)
+  int64 range_start_ms = 8;
+  int64 range_end_ms = 9;
+  repeated CognitionActivityBucket buckets = 10;
+  repeated CognitionStreamHint streams = 11;
+}
+
+// A peer's contributions by source and workflow — DISCOVERY overview from
+// that peer's systems of record (e.g. gaius.activity / gaius.openlineage
+// today; Atlas+OpenLineage, Metaflow, and Airflow from core Signals are
+// PENDING — each system of record answers as it becomes able; an unset
+// hint or absent system is honest, never an error). Serving engine picks
+// the window (~30d). (added 2026-08-31, gaius — additive v1.)
+message ContributionItem {
+  string group = 1;   // "source" | "workflow"
+  string id = 2;      // e.g. arxiv_cs_dc | article_curation
+  string system = 3;  // system of record, e.g. gaius.openlineage
+  int32 total = 4;
+  repeated int32 series = 5; // aligned to hint buckets, zero-filled
+}
+
+message ContributionsHint {
+  string project = 1;
+  string interval = 2;        // bucket unit served (hour|6h|day|week|month)
+  int64 range_start_ms = 3;
+  int64 range_end_ms = 4;
+  repeated CognitionActivityBucket buckets = 5; // bounds only (counts unused)
+  repeated ContributionItem items = 6;
+}
+
+// ── SHACL Core subset (added 2026-09-20 — additive v1) ─────────────────────
+//
+// An Aspect IS a NodeShape. A Product specification is a NodeShape that
+// composes required aspects (sh:and). A product instance is the focus node.
+// This is SHACL Core (W3C Rec §§2–4), not SHACL-SPARQL: no sh:sparql, no
+// entailment, v1 paths are predicate paths only. Names follow sh: parameters.
+// Namespace for warehouse attributes: https://signals.zndx.org/ns/dp#
+// (predicate = details.a local name, or a dp: IRI).
+// optional counts so max_count = 0 is distinct from unset (attachment
+// upper bound). See specification/protocol/data_products.md.
+
+enum ShaclNodeKind {
+  SHACL_NODE_KIND_UNSPECIFIED = 0;
+  SHACL_NODE_KIND_IRI = 1;
+  SHACL_NODE_KIND_BLANK_NODE = 2;
+  SHACL_NODE_KIND_LITERAL = 3;
+  SHACL_NODE_KIND_BLANK_NODE_OR_IRI = 4;
+  SHACL_NODE_KIND_BLANK_NODE_OR_LITERAL = 5;
+  SHACL_NODE_KIND_IRI_OR_LITERAL = 6;
+}
+
+enum ShaclSeverity {
+  SHACL_SEVERITY_UNSPECIFIED = 0;  // default sh:Violation
+  SHACL_SEVERITY_INFO = 1;
+  SHACL_SEVERITY_WARNING = 2;
+  SHACL_SEVERITY_VIOLATION = 3;
+}
+
+message PropertyPath {
+  string predicate = 1;  // IRI; v1 predicate path only
+}
+
+message PropertyShape {
+  string id = 1;
+  PropertyPath path = 2;                 // REQUIRED sh:path
+  string name = 3;
+  string description = 4;
+  optional int32 min_count = 5;          // sh:minCount
+  optional int32 max_count = 6;          // sh:maxCount; 0 = empty list required
+  string datatype = 7;                   // sh:datatype (xsd:*)
+  string class = 8;                      // sh:class
+  ShaclNodeKind node_kind = 9;
+  string pattern = 10;
+  string flags = 11;
+  repeated string in = 12;               // sh:in
+  string has_value = 13;
+  optional int32 min_length = 14;
+  optional int32 max_length = 15;
+  string node = 16;                      // nested NodeShape id (sh:node)
+  ShaclSeverity severity = 17;
+  string message = 18;
+  bool deactivated = 19;
+}
+
+message NodeShape {
+  string id = 1;                         // IRI — aspect_id or spec_id
+  repeated string target_class = 2;
+  repeated string target_node = 3;
+  bool closed = 4;
+  repeated string ignored_properties = 5;
+  repeated PropertyShape property = 6;
+  repeated string and = 7;               // NodeShape ids
+  repeated string or = 8;
+  string not = 9;
+  repeated string xone = 10;
+  ShaclSeverity severity = 11;
+  string message = 12;
+  bool deactivated = 13;
+}
+
+message AspectSpec {
+  NodeShape shape = 1;                   // shape.id == signals.aspect.*
+  string title = 2;                      // rdfs:label
+  string intent = 3;                     // human; not a SHACL parameter
+}
+
+message ProductSpec {
+  NodeShape shape = 1;                   // shape.id == signals.spec.*; shape.and = required aspect ids
+  string title = 2;
+}
+
+message ValidationResult {
+  ShaclSeverity severity = 1;
+  string focus_node = 2;                 // product_id
+  string result_path = 3;
+  string value = 4;
+  string source_constraint_component = 5;
+  string source_shape = 6;
+  string result_message = 7;
+}
+
+message ValidationReport {
+  bool conforms = 1;
+  repeated ValidationResult result = 2;
+}
+
+message AspectBinding {
+  string aspect_id = 1;
+  bool conforms = 2;
+  string claim_status = 3;               // declared | holding | failed
+  ValidationReport report = 4;
+  string evidence_uri = 5;
+  string seal = 6;                       // "" | in_force | sealed
+}
+
+// One federated data product a peer publishes — DISCOVERY only. The Signals
+// warehouse (details / tx / hx_reasoning, see specification/protocol/
+// data_products.md) stays the inventory of record; this lets any engine find a
+// product and its Iceberg table in the shared Polaris catalog without first
+// reading Signals. Additive; empty list is honest.
+// (added 2026-08-30, gaius — additive v1.)
+message ProductHint {
+  string product_id = 1;        // {peer}.{domain}.{name}, e.g. gaius.curation.cot_reasoning
+  string peer = 2;              // publishing engine
+  string title = 3;
+  string kind = 4;              // corpus | reasoning | snapshots | embeddings | ...
+  string leaf = 5;              // YK resource-class queue the producing flow runs on
+  string table_identifier = 6;  // Iceberg identifier in the shared Polaris catalog (e.g. hx.cot_reasoning); "" = object-only
+  string data_uri = 7;          // object location on the Signals object plane (RustFS)
+  string flow = 8;              // producing Metaflow flow, e.g. ArticleCurationFlow
+  string step = 9;              // producing step, e.g. select_article ("" = whole flow)
+  string agent_focus = 10;      // what a reviewing agent should assess
+  string history = 11;          // how history is retained, e.g. "iceberg-snapshots+run-qualified-details"
+  string spec_id = 12;          // signals.spec.* this instance claims (added 2026-09-20)
+  repeated AspectBinding aspects = 13;  // SHACL bindings vs the shapes graph (added 2026-09-20)
+}
+
+// ── Workload requirements: typed model (vLLM · KServe · YuniKorn targets) ──
+// Concrete over evolvable-k/v — requirements become known, so we represent them
+// semantically. Expected to grow MORE explicit over time, not less.
+
+// Serving substrate. VLLM_LOCAL is engine-resident and YuniKorn gang-scheduled
+// (sentinels-accounted); KSERVE_REMOTE is a remote KServe InferenceService the
+// Signals engine integrates while still running local YK admission + sentinels
+// accounting for co-resident work.
+enum ServingBackend {
+  SERVING_BACKEND_UNSPECIFIED   = 0;
+  SERVING_BACKEND_VLLM_LOCAL    = 1;
+  SERVING_BACKEND_KSERVE_REMOTE = 2;
+  SERVING_BACKEND_CPU_PROXY     = 3;  // optillm/CPU proxy, no GPU
+}
+
+// YuniKorn occupancy class — what a workload NEEDS, not which process it is.
+// (The former process-named "extract" was a misstep; it folds into LIGHT, which
+// states what the workflow step needs within its pending Metaflow profile.)
+enum ResourceClass {
+  RESOURCE_CLASS_UNSPECIFIED = 0;
+  RESOURCE_CLASS_HEAVY   = 1;
+  RESOURCE_CLASS_MEDIUM  = 2;
+  RESOURCE_CLASS_LIGHT   = 3;  // subsumes the former "extract"
+  RESOURCE_CLASS_COMPUTE = 4;  // CPU/compute, no GPU
+}
+
+// Explicit model parallelism (vLLM). data_parallel defaults to 1.
+message ModelParallelism {
+  int32 tensor_parallel   = 1;
+  int32 pipeline_parallel = 2;
+  int32 data_parallel     = 3;
+}
+
+// Typed resource footprint, mirroring YuniKorn's named-resource model so the
+// Signals engine sets queue guaranteed/max directly. gpu = federation.zndx.org/gpu.
+message ResourceFootprint {
+  int32 gpu        = 1;  // GPU units (tensor_parallel * pipeline_parallel * data_parallel)
+  int64 vram_mib   = 2;  // per-application VRAM ceiling
+  int64 memory_mib = 3;  // host memory
+  int32 vcore      = 4;  // CPU
+}
+
+// Remote KServe coordinates (set when backend = KSERVE_REMOTE).
+message KServeTarget {
+  string inference_service = 1;  // InferenceService metadata.name
+  string namespace         = 2;
+  string serving_runtime   = 3;  // e.g. vllm, triton
+}
+
+// What a workload physically requires — typed and backend-aware.
+message WorkloadRequirements {
+  ServingBackend    backend     = 1;
+  ModelParallelism  parallelism = 2;  // vLLM local
+  ResourceFootprint footprint   = 3;  // → YK queue guaranteed/max
+  KServeTarget      kserve      = 4;  // remote KServe
+}
+
+// ── Operating profiles: how a capability is SERVED on a model (added 2026-09-08 — additive v1) ──
+// "Capabilities, not models" also means capabilities, not call parameters. One resident model
+// serves several MODEL capabilities; each is an OPERATING PROFILE the serving engine ALIGNS its
+// call parameters to when a calling engine names that capability. The caller never names a
+// model or a kwarg; the serving engine reports the profile it applied so warehouse rows
+// (hx_reasoning) keep one structure across capabilities. Vocabulary + rules:
+// specification/protocol/capabilities.md §Operating profiles.
+//   thinking — reasoning on, effort xhigh (the model default)
+//   instruct — reasoning on, effort low: the same model, a brief trace, less overhead
+// An engine that does not HOST the model MUST NOT advertise the capability (Status endpoints,
+// WORKLOADS offers); it forwards Complete to a peer that does, or answers FAILED_PRECONDITION.
+// No silent fallback to another capability.
+message OperatingProfile {
+  string capability = 1;        // the model capability this profile serves (instruct | thinking | …)
+  bool thinking = 2;            // reasoning trace on (Qwen3-class enable_thinking)
+  string reasoning_effort = 3;  // model-defined level while thinking is on (xhigh | medium | low); "" = model default
+  string note = 4;              // human: why this profile exists
+}
+// What a peer currently offers to serve, and what it physically requires.
+// Occupancy (resource_class / queue) is a hint; the caller picks the share at
+// RequestQueueShare. The Signals engine aggregates WorkloadOffers across the
+// federation (its federated view) to maintain YuniKorn queue resource
+// guarantees/maximums as footprints change over time (e.g. Metaflow workload
+// churn shifting inference/compute footprints). Empty list is honest.
+message WorkloadOffer {
+  string peer = 1;                          // gaius | aegir | atelier | …
+  string model = 2;                         // serving name; changes over time
+  repeated string capabilities = 3;         // thinking | complete | clt | sae | … (enum candidate)
+  WorkloadRequirements requirements = 4;    // typed physical/packing needs
+  ResourceClass resource_class = 5;         // occupancy class (what it needs)
+  string queue = 6;                         // optional FQN hint
+  // METHOD capabilities (optillm technique classes) this peer can serve in a
+  // Complete capabilities[] conjunction, e.g. cot_reflection, bon. A federated
+  // planner checks the models × methods mix before routing. Empty list is
+  // honest. (added 2026-08-30, gaius — additive v1.)
+  repeated string methods = 7;
+  // One OperatingProfile per model capability in `capabilities` this offer serves
+  // (added 2026-09-08 — additive v1). A capability without a profile is served at
+  // the model default — honest, never invented. Discovery only; Complete reports
+  // the profile actually applied.
+  repeated OperatingProfile profiles = 8;
+}
+
+// A leaf this engine needs Signals to have (declared *shape*).
+// Time-varying guaranteed capacity is Scheduler/RequestQueueShare.
+// Empty fields mean "do not invent" — Signals merges additively.
+message QueueHint {
+  string path = 1;                 // root.internal.inference.light
+  string resource_class = 2;       // internal.inference.light
+  int32 gpu_guarantee = 3;
+  int32 gpu_max = 4;
+  int32 max_applications = 5;
+  string preemption_policy = 6;    // default | fence | disabled
+  string preemption_delay = 7;     // Go duration, e.g. 5s
+  string role = 8;                 // light | medium | heavy | offline
+  string examples = 9;
+}
+
+// OpenLineage 2.0 RunEvent JSON for Signals Atlas SoR (`POST /api/v1/lineage`).
+// (added 2026-08-19, gaius — additive v1.)
+message LineageRequest {
+  string event_json = 1;   // OL RunEvent JSON (eventType START|COMPLETE|FAIL)
+  string event_type = 2;   // START | COMPLETE | FAIL (must match event_json)
+}
+
+message LineageResponse {
+  bool accepted = 1;
+  string error = 2;        // guru when Atlas refuses or is unreachable
+}
+
+// ── Intended workload profile stream (WatchWorkload) ──────────────────────────
+// The engine's live desired-vs-actual serving set, so an out-of-band watchdog can
+// verify without racing changeovers. (added 2026-08-30, gaius — additive v1.)
+
+message WatchWorkloadRequest {}
+
+// Whether the intended set is stable enough to verify.
+enum WorkloadPhase {
+  WORKLOAD_PHASE_UNSPECIFIED = 0;
+  WORKLOAD_PHASE_SETTLED = 1;        // intended set is stable — safe to verify now
+  WORKLOAD_PHASE_TRANSITIONING = 2;  // a changeover is imminent/in progress — HOLD
+}
+
+// The ACTUAL state of one intended endpoint, as the engine observes it. Distinct
+// from the ProcessStatus enum so the wire contract stays stable if internals move.
+enum WorkloadStatus {
+  WORKLOAD_STATUS_UNSPECIFIED = 0;
+  WORKLOAD_STATUS_SERVING  = 1;  // up and answering (the only non-mismatch state)
+  WORKLOAD_STATUS_STARTING = 2;  // admitted/loading — within warmup, not yet a miss
+  WORKLOAD_STATUS_DEGRADED = 3;  // up but not fully healthy
+  WORKLOAD_STATUS_FAILED   = 4;  // intended up, but load/serve failed
+  WORKLOAD_STATUS_ABSENT   = 5;  // intended up, but no process exists at all
+}
+
+// One capability the engine INTENDS to be serving in this profile, with its
+// actual status. Absence from the profile means "not intended" (e.g. thinking
+// while evicted for a render) — never a failure.
+message WorkloadIntent {
+  string capability = 1;         // thinking | ask-sae | embedding | render | ...
+  string alias = 2;              // deployment alias (thinking, ask-agent, ...)
+  string model = 3;              // model it intends to serve with
+  int32 port = 4;                // local serving port (0 = not port-served)
+  repeated int32 gpu_ids = 5;    // GPUs it pins
+  ServingBackend backend = 6;    // vllm_local | cpu_proxy | kserve_remote
+  int32 warmup_seconds = 7;      // grace after settle before actual != SERVING = a miss
+  WorkloadStatus actual = 8;     // what the engine observes right now
+}
+
+// The engine's intended workload profile at a moment. Always present while alive.
+message WorkloadProfile {
+  WorkloadPhase phase = 1;
+  uint64 generation = 2;          // monotonic; advances on every settled changeover
+  repeated WorkloadIntent intents = 3;
+  int64 settled_at_unix_ms = 4;   // when this profile settled (warmup math)
+  string detail = 5;              // human note: what triggered the change
+}
+
+// A peer asking to be remembered in the callee's PEERS set.
+// engine_target is the lattice gRPC host:port — never a UI URL.
+// surfaces[] is advisory; the directory Status's engine_target for the waffle.
+// (added 2026-09-04, aegir — additive v1.)
+message PeerAnnounce {
+  string project = 1;            // hermes | metabase | …
+  string engine_target = 2;      // host:port of the announcer's Engine
+  repeated Surface surfaces = 3; // optional; Status remains authoritative
+  int32 ttl_seconds = 4;         // 0 = directory default; directory may clamp
+}
+
+message AnnounceAck {
+  bool accepted = 1;
+  int32 ttl_seconds = 2;  // TTL the directory will actually keep
+  string error = 3;       // guru when refused; empty on accept
+}

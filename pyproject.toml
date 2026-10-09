@@ -27,6 +27,11 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Packaged proto snapshot (signals_engine.proto). Peers compile against this
+# tree; they do not vendor a second signals-protocol checkout.
+[tool.setuptools.package-data]
+signals_engine = ["proto/**/*.proto", "proto/SNAPSHOT.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
