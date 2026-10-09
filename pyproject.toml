@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signals-engine"
+version = "0.1.0"
+description = "Lattice gRPC engine for the signals federation: zndx.engine.v1 plus KServe OIP message types on one port."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [{ name = "Weathership" }]
+dependencies = [
+    # Generated stubs record grpcio 1.81.1. 1.82+ reflection needs protobuf 7,
+    # which Gaius cannot take while xai-sdk forbids it.
+    "grpcio>=1.81.1,<1.82",
+    "grpcio-reflection>=1.81.1,<1.82",
+    "protobuf>=5.29.1,<7",
+]
+
+[dependency-groups]
+dev = [
+    "grpcio-tools>=1.81.1,<1.82",
+    "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

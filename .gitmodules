@@ -1,0 +1,3 @@
+[submodule "components/signals-protocol"]
+	path = components/signals-protocol
+	url = git@github.com:zndx/signals-protocol.git
