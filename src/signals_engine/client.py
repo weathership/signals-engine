@@ -12,6 +12,7 @@ import grpc
 
 from signals_engine import oip
 from signals_engine.types import Completion, CompletionRequest, ToolCall
+from signals_engine.wire.inference import open_inference_grpc_pb2 as oip_pb
 from signals_engine.wire.inference import open_inference_grpc_pb2_grpc as oip_grpc
 from signals_engine.wire.zndx.engine.v1 import engine_pb2
 from signals_engine.wire.zndx.engine.v1 import engine_pb2_grpc
@@ -19,8 +20,17 @@ from signals_engine.wire.zndx.engine.v1 import engine_pb2_grpc
 log = logging.getLogger("signals_engine.client")
 
 
+_MAX_MESSAGE = 64 * 1024 * 1024
+
+
 def channel(target: str) -> grpc.Channel:
-    return grpc.insecure_channel(target.replace("grpc://", "").strip())
+    return grpc.insecure_channel(
+        target.replace("grpc://", "").strip(),
+        options=(
+            ("grpc.max_send_message_length", _MAX_MESSAGE),
+            ("grpc.max_receive_message_length", _MAX_MESSAGE),
+        ),
+    )
 
 
 def status(target: str, timeout: float = 4.0) -> engine_pb2.StatusResponse:
@@ -94,6 +104,16 @@ def announce(
             return None
         log.warning("Announce failed at %s: %s %s", addr, exc.code(), exc.details())
         return None
+
+
+def model_ready(target: str, name: str, timeout: float = 4.0) -> bool:
+    request = oip_pb.ModelReadyRequest(name=name)
+    try:
+        with channel(target) as ch:
+            response = oip_grpc.GRPCInferenceServiceStub(ch).ModelReady(request, timeout=timeout)
+        return bool(response.ready)
+    except grpc.RpcError:
+        return False
 
 
 def model_infer(target: str, request: CompletionRequest, timeout: float = 30.0) -> Completion:

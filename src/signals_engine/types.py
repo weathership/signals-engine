@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -93,6 +94,23 @@ class Completion:
 
 
 @dataclass(frozen=True)
+class StreamFrame:
+    """One OIP stream frame. ``kind`` is progress, reasoning_delta, text_delta, or final."""
+
+    kind: str
+    text: str = ""
+    reasoning: str = ""
+    phase: str = ""
+    detail: str = ""
+    finish_reason: str = ""
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    latency_ms: float = 0.0
+    fulfilled_by: str = ""
+
+
+@dataclass(frozen=True)
 class YieldOutcome:
     ok: bool = True
     process_ended: bool = False
@@ -117,6 +135,10 @@ class NativeService:
 
 
 CompleteHandler = Callable[[CompletionRequest], Completion]
+# The event is set when the client cancels or sends a new prompt. Stop promptly.
+StreamHandler = Callable[[CompletionRequest, threading.Event], Iterator[StreamFrame]]
+# Capability name to the hosting engine's host:port. Raise HandlerError when none match.
+RouteHandler = Callable[[str], str]
 YieldHandler = Callable[[str, int, str, str], YieldOutcome]
 QueryHandler = Callable[[object, object], None]
 RpcHandler = Callable[..., object]
@@ -131,6 +153,10 @@ class EngineHooks:
     endpoints: EndpointProbe | None = None
     surfaces: SurfaceProbe | None = None
     complete: CompleteHandler | None = None
+    # Token frames for a capability this process hosts. ModelStreamInfer calls it.
+    stream: StreamHandler | None = None
+    # Capability this process does not host. Returns the peer host:port to relay to.
+    route: RouteHandler | None = None
     yield_workload: YieldHandler | None = None
     # ServerQuery kinds this host fills. Key is ServerQueryKind int.
     query: dict[int, QueryHandler] = field(default_factory=dict)

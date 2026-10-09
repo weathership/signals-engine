@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import queue
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import grpc
@@ -11,10 +14,13 @@ from signals_engine.directory import Directory
 from signals_engine.lineage import lineage_url, record_lineage
 from signals_engine.query import fill_server_query
 from signals_engine.types import (
+    Completion,
+    CompletionRequest,
     EndpointSpec,
     EngineHooks,
     HandlerError,
     PeerIdentity,
+    StreamFrame,
     YieldOutcome,
 )
 from signals_engine.wire.inference import open_inference_grpc_pb2 as oip_pb
@@ -51,7 +57,17 @@ class EngineState:
 
     @property
     def serves_model(self) -> bool:
-        return self.hooks.complete is not None
+        return self.hooks.complete is not None or self.hooks.stream is not None
+
+    @property
+    def accepts_inference(self) -> bool:
+        return self.serves_model or self.hooks.route is not None
+
+
+def _hosts(state: EngineState, capability: str) -> bool:
+    if state.hooks.endpoints is None:
+        return False
+    return any(endpoint.capability == capability for endpoint in state.hooks.endpoints())
 
 
 def _call_complete(state: EngineState, request, context):
@@ -217,7 +233,7 @@ class OipServicer(oip_grpc.GRPCInferenceServiceServicer):
     def ServerReady(self, request, context):
         # The process can accept inference only when a host registered a model handler.
         # Per-capability residency is ModelReady.
-        return oip_pb.ServerReadyResponse(ready=self.state.serves_model)
+        return oip_pb.ServerReadyResponse(ready=self.state.accepts_inference)
 
     def ModelReady(self, request, context):
         name = (request.name or "").strip()
@@ -268,7 +284,12 @@ class OipServicer(oip_grpc.GRPCInferenceServiceServicer):
         incoming = oip.completion_request_from_oip(request)
         if not incoming.prompt and not incoming.messages_json:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'no "prompt" input tensor provided')
-        result = _call_complete(self.state, incoming, context)
+        if self.state.hooks.complete is not None:
+            result = _call_complete(self.state, incoming, context)
+        elif self.state.hooks.stream is not None:
+            result = _fold_stream(self.state, incoming, context)
+        else:
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, _NO_MODEL)
         response = oip_pb.ModelInferResponse()
         oip.apply_completion(
             response,
@@ -279,9 +300,11 @@ class OipServicer(oip_grpc.GRPCInferenceServiceServicer):
         return response
 
     def ModelStreamInfer(self, request_iterator, context):
-        # Same ModelInferRequest / ModelInferResponse messages as unary OIP.
-        # A unary host handler yields one frame per client request. Token
-        # deltas stay with the host until it registers a streaming handler.
+        # Bi-directional when a host streams or routes. Otherwise one unary
+        # completion frame per request, for engines that only register complete.
+        if self.state.hooks.stream is not None or self.state.hooks.route is not None:
+            yield from _bidi_stream(self.state, request_iterator, context)
+            return
         for request in request_iterator:
             incoming = oip.completion_request_from_oip(request)
             if not incoming.prompt and not incoming.messages_json:
@@ -298,3 +321,204 @@ class OipServicer(oip_grpc.GRPCInferenceServiceServicer):
                 model_name=request.model_name or incoming.capability,
             )
             yield response
+
+
+def _fold_stream(state: EngineState, request: CompletionRequest, context) -> Completion:
+    text: list[str] = []
+    reasoning: list[str] = []
+    final: StreamFrame | None = None
+    assert state.hooks.stream is not None
+    try:
+        for frame in state.hooks.stream(request, threading.Event()):
+            if frame.kind == "text_delta":
+                text.append(frame.text)
+            elif frame.kind == "reasoning_delta":
+                reasoning.append(frame.text)
+            elif frame.kind == "final":
+                final = frame
+    except HandlerError as exc:
+        context.abort(exc.code, exc.detail)
+    if final is not None:
+        return Completion(
+            text=final.text or "".join(text),
+            model=final.model,
+            prompt_tokens=final.prompt_tokens,
+            completion_tokens=final.completion_tokens,
+            latency_ms=final.latency_ms,
+            reasoning_content=final.reasoning or "".join(reasoning),
+            finish_reason=final.finish_reason or "stop",
+            fulfilled_by=final.fulfilled_by,
+        )
+    return Completion(
+        text="".join(text),
+        reasoning_content="".join(reasoning),
+        finish_reason="stop",
+    )
+
+
+def _next_request(request_iterator):
+    try:
+        return next(request_iterator)
+    except (StopIteration, grpc.RpcError):
+        return None
+
+
+def _bidi_stream(state: EngineState, request_iterator, context) -> Iterator[object]:
+    first = _next_request(request_iterator)
+    if first is None:
+        return
+    if oip.is_cancel(first):
+        yield oip.frame_to_response(
+            StreamFrame(kind="final", finish_reason="cancelled"),
+            request_id=first.id or "",
+            capability="",
+        )
+        return
+    incoming = oip.completion_request_from_oip(first)
+    if not incoming.prompt and not incoming.messages_json:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'no "prompt" input tensor provided')
+    capability = incoming.capability
+    if not capability:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "capability is required")
+    try:
+        hosted = _hosts(state, capability)
+    except HandlerError as exc:
+        context.abort(exc.code, exc.detail)
+    if hosted and state.hooks.stream is not None:
+        yield from _host_session(state, first, request_iterator, context)
+        return
+    if state.hooks.route is not None:
+        yield from _relay_session(state, first, request_iterator, context, capability)
+        return
+    if state.hooks.stream is not None:
+        yield from _host_session(state, first, request_iterator, context)
+        return
+    context.abort(grpc.StatusCode.UNIMPLEMENTED, _NO_MODEL)
+
+
+def _host_session(state: EngineState, first, request_iterator, context) -> Iterator[object]:
+    """Run generations. A later request cancels the one in flight."""
+    assert state.hooks.stream is not None
+    pending = first
+    while pending is not None:
+        if oip.is_cancel(pending):
+            yield oip.frame_to_response(
+                StreamFrame(kind="final", finish_reason="cancelled"),
+                request_id=pending.id or "",
+                capability="",
+            )
+            pending = _next_request(request_iterator)
+            continue
+        incoming = oip.completion_request_from_oip(pending)
+        if not incoming.prompt and not incoming.messages_json:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'no "prompt" input tensor provided')
+        cancel = threading.Event()
+        box: dict[str, object] = {}
+
+        def watch(box: dict[str, object] = box, cancel: threading.Event = cancel) -> None:
+            box["req"] = _next_request(request_iterator)
+            cancel.set()
+
+        watcher = threading.Thread(target=watch, name="signals-stream-watch", daemon=True)
+        watcher.start()
+        saw_final = False
+        text: list[str] = []
+        reasoning: list[str] = []
+        try:
+            for frame in state.hooks.stream(incoming, cancel):
+                if frame.kind == "text_delta":
+                    text.append(frame.text)
+                elif frame.kind == "reasoning_delta":
+                    reasoning.append(frame.text)
+                elif frame.kind == "final":
+                    saw_final = True
+                yield oip.frame_to_response(
+                    frame,
+                    request_id=pending.id or "",
+                    capability=incoming.capability,
+                )
+                if cancel.is_set() and frame.kind != "final":
+                    break
+        except HandlerError as exc:
+            context.abort(exc.code, exc.detail)
+        if cancel.is_set():
+            watcher.join(timeout=2.0)
+            nxt = box.get("req")
+            if not saw_final:
+                reason = "superseded" if nxt is not None and not oip.is_cancel(nxt) else "cancelled"
+                yield oip.frame_to_response(
+                    StreamFrame(
+                        kind="final",
+                        text="".join(text),
+                        reasoning="".join(reasoning),
+                        finish_reason=reason,
+                    ),
+                    request_id=pending.id or "",
+                    capability=incoming.capability,
+                )
+        else:
+            if not saw_final:
+                yield oip.frame_to_response(
+                    StreamFrame(
+                        kind="final",
+                        text="".join(text),
+                        reasoning="".join(reasoning),
+                        finish_reason="stop",
+                    ),
+                    request_id=pending.id or "",
+                    capability=incoming.capability,
+                )
+            watcher.join()
+            nxt = box.get("req")
+        if nxt is not None and oip.is_cancel(nxt):
+            pending = _next_request(request_iterator)
+        else:
+            pending = nxt
+
+
+def _relay_session(state: EngineState, first, request_iterator, context, capability: str) -> Iterator[object]:
+    """One routing progress frame, then the upstream ModelInferResponses unchanged."""
+    from signals_engine.route import relay_model_stream
+
+    assert state.hooks.route is not None
+    try:
+        target = state.hooks.route(capability)
+    except HandlerError as exc:
+        context.abort(exc.code, exc.detail)
+    if not target:
+        context.abort(
+            grpc.StatusCode.FAILED_PRECONDITION,
+            f"no peer hosts {capability}",
+        )
+    yield oip.frame_to_response(
+        StreamFrame(kind="progress", phase="routing", detail=target),
+        request_id=first.id or "",
+        capability=capability,
+    )
+    bridge: queue.Queue = queue.Queue()
+
+    def pump() -> None:
+        try:
+            for request in request_iterator:
+                bridge.put(request)
+        except grpc.RpcError:
+            return
+        finally:
+            bridge.put(None)
+
+    threading.Thread(target=pump, name="signals-relay-pump", daemon=True).start()
+
+    def upstream():
+        yield first
+        while True:
+            item = bridge.get()
+            if item is None:
+                return
+            yield item
+
+    try:
+        yield from relay_model_stream(target, upstream())
+    except grpc.RpcError as exc:
+        context.abort(exc.code(), exc.details() or exc.code().name)
+    except HandlerError as exc:
+        context.abort(exc.code, exc.detail)

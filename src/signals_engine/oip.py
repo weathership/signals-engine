@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from signals_engine.types import Completion, CompletionRequest, ToolCall
+from signals_engine.types import Completion, CompletionRequest, StreamFrame, ToolCall
 from signals_engine.wire.inference import open_inference_grpc_pb2 as oip_pb
 
 T_PROMPT = "prompt"
@@ -31,6 +31,10 @@ T_MESSAGES = "messages"
 T_COMPLETION = "completion"
 T_REASONING = "reasoning_content"
 T_TOOL_CALLS = "tool_calls"
+T_TEXT_DELTA = "text_delta"
+T_REASONING_DELTA = "reasoning_delta"
+T_PROGRESS = "progress"
+CONTROL_CANCEL = "cancel"
 
 EXTENSION_ENGINE = "zndx.engine.v1.Engine"
 EXTENSION_STREAM = "model_stream_infer"
@@ -265,9 +269,119 @@ def input_names(*, tools: bool) -> tuple[str, ...]:
 
 
 def output_names(*, tools: bool) -> tuple[str, ...]:
-    names = [T_COMPLETION, T_REASONING]
+    names = [T_COMPLETION, T_REASONING, T_TEXT_DELTA, T_REASONING_DELTA, T_PROGRESS]
     if tools:
         names.append(T_TOOL_CALLS)
     return tuple(names)
+
+
+def is_cancel(request: Any) -> bool:
+    got = _param(request, "control")
+    return bool(got and got[0] == "string_param" and str(got[1]) == CONTROL_CANCEL)
+
+
+def progress_json(phase: str, detail: str) -> str:
+    return json.dumps({"phase": phase, "detail": detail}, separators=(",", ":"))
+
+
+def _tensor_text(tensor: Any) -> str:
+    raw = tensor.contents.bytes_contents[0] if tensor.contents.bytes_contents else b""
+    return raw.decode("utf-8") if raw else ""
+
+
+def _add_bytes(response: Any, name: str, text: str) -> None:
+    out = response.outputs.add()
+    out.name = name
+    out.datatype = "BYTES"
+    out.shape.extend([1])
+    out.contents.bytes_contents.append((text or "").encode("utf-8"))
+
+
+def frame_to_response(frame: StreamFrame, *, request_id: str, capability: str) -> Any:
+    """One ModelInferResponse for a stream frame. One tensor, except the final frame."""
+    response = oip_pb.ModelInferResponse(
+        model_name=frame.model or capability,
+        model_version="v1",
+        id=request_id or "",
+    )
+    if frame.kind == "progress":
+        _add_bytes(response, T_PROGRESS, progress_json(frame.phase, frame.detail))
+    elif frame.kind == "reasoning_delta":
+        _add_bytes(response, T_REASONING_DELTA, frame.text)
+    elif frame.kind == "text_delta":
+        _add_bytes(response, T_TEXT_DELTA, frame.text)
+    else:
+        _add_bytes(response, T_COMPLETION, frame.text)
+        if frame.reasoning:
+            _add_bytes(response, T_REASONING, frame.reasoning)
+        response.parameters["finish_reason"].string_param = frame.finish_reason or "stop"
+        if frame.prompt_tokens:
+            response.parameters["prompt_tokens"].int64_param = int(frame.prompt_tokens)
+        if frame.completion_tokens:
+            response.parameters["tokens_used"].int64_param = int(frame.completion_tokens)
+        if frame.latency_ms:
+            response.parameters["latency_ms"].double_param = float(frame.latency_ms)
+    if capability:
+        response.parameters["capability"].string_param = capability
+    if frame.model:
+        response.parameters["model"].string_param = frame.model
+    if frame.fulfilled_by:
+        response.parameters["backend"].string_param = frame.fulfilled_by
+    return response
+
+
+def frame_from_response(response: Any) -> StreamFrame:
+    """Read one relayed ModelInferResponse. Unknown tensors are left in place by callers."""
+    fields: dict[str, str] = {out.name: _tensor_text(out) for out in response.outputs}
+    model = ""
+    finish = ""
+    prompt_tokens = completion_tokens = 0
+    latency = 0.0
+    fulfilled = ""
+    got = _param(response, "model")
+    if got and got[0] == "string_param":
+        model = str(got[1])
+    got = _param(response, "finish_reason")
+    if got and got[0] == "string_param":
+        finish = str(got[1])
+    got = _param(response, "prompt_tokens")
+    if got and got[0] == "int64_param":
+        prompt_tokens = int(got[1])
+    got = _param(response, "tokens_used")
+    if got and got[0] == "int64_param":
+        completion_tokens = int(got[1])
+    got = _param(response, "latency_ms")
+    if got and got[0] == "double_param":
+        latency = float(got[1])
+    got = _param(response, "backend")
+    if got and got[0] == "string_param":
+        fulfilled = str(got[1])
+    model = model or response.model_name or ""
+    if T_PROGRESS in fields:
+        phase = ""
+        detail = fields[T_PROGRESS]
+        try:
+            doc = json.loads(fields[T_PROGRESS])
+        except json.JSONDecodeError:
+            doc = None
+        if isinstance(doc, dict):
+            phase = str(doc.get("phase") or "")
+            detail = str(doc.get("detail") or "")
+        return StreamFrame(kind="progress", phase=phase, detail=detail, model=model, fulfilled_by=fulfilled)
+    if T_REASONING_DELTA in fields:
+        return StreamFrame(kind="reasoning_delta", text=fields[T_REASONING_DELTA], model=model)
+    if T_TEXT_DELTA in fields:
+        return StreamFrame(kind="text_delta", text=fields[T_TEXT_DELTA], model=model)
+    return StreamFrame(
+        kind="final",
+        text=fields.get(T_COMPLETION, ""),
+        reasoning=fields.get(T_REASONING) or fields.get("reasoning") or "",
+        finish_reason=finish or "stop",
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        latency_ms=latency,
+        fulfilled_by=fulfilled,
+    )
 
 

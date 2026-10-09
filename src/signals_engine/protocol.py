@@ -1,19 +1,16 @@
 """Protocol snapshot shipped with this engine.
 
 ``zndx`` protos have one text: the ``signals-protocol`` submodule. This
-package pins one commit of that repo and ships the tree, the generated
-Python, and the federation Open Inference proto. A peer such as Semantica
+package pins one commit of that repo and ships the tree, including the
+Open Inference proto, plus the generated Python. A peer such as Semantica
 depends on ``signals-engine`` and imports this snapshot. It does not vendor
 its own ``signals-protocol`` checkout.
 
 Evolve the wire in the submodule. Stay additive inside a version; a breaking
 change is a new package. Commit that repo on ``trunk``, point this repo's
 gitlink at the commit, and run ``just gen``. The stubs, the packaged protos,
-and ``PROTOCOL_SHA`` move in the same engine commit.
-
-``proto/inference/open_inference_grpc.proto`` in this repo is the OIP text
-until that file lives in signals-protocol. ``just gen`` copies it into the
-same include root as the ``zndx`` protos. ``OIP_SHA256`` names those bytes.
+and ``PROTOCOL_SHA`` move in the same engine commit. ``OIP_SHA256`` names
+``inference/open_inference_grpc.proto`` inside that commit.
 """
 
 from pathlib import Path

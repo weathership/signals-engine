@@ -37,10 +37,11 @@ Wire changes are additive inside a version. A break is a new package.
    `PROTOCOL_SHA` together.
 4. Commit the gitlink and the generated tree in this repo.
 
-`proto/inference/open_inference_grpc.proto` is the OIP text until it lands in
-signals-protocol. `just gen` copies it into the same include root.
-`OIP_SHA256` names that file. Specs stay in
-`components/signals-protocol/specification` at `PROTOCOL_SHA`.
+The OIP proto is `inference/open_inference_grpc.proto` inside that same
+commit. `OIP_SHA256` names its bytes. The stream hop — capability routing,
+deltas, progress, cancel — is `specification/protocol/oip_stream.md` in the
+pin. Specs stay in `components/signals-protocol/specification` at
+`PROTOCOL_SHA`.
 
 ## What a host supplies
 
@@ -89,6 +90,22 @@ This process is not a Matrix homeserver.
 `PEERS` is the contract's same-box `advertise-host:port` rows plus the
 directory's live announces. A `PeerHint.target` from another host is stored
 as given.
+
+## Local stream hop
+
+Gaius still carries its own protocol pin, so local work talks to vLLM
+directly. The reference engine hosts `thinking` and dials
+`SIGNALS_VLLM_BASE_URL` (lab: `http://127.0.0.1:8081/v1`). The sample engine
+does not advertise `thinking`. It chooses the reference with `Status` and
+`ModelReady`, then relays `ModelStreamInfer`. `SampleClient` speaks only to
+the sample engine.
+
+```bash
+SIGNALS_VLLM_BASE_URL=http://127.0.0.1:8081/v1 python -m signals_engine.reference
+SIGNALS_UPSTREAM=127.0.0.1:<reference port> python -m signals_engine.sample
+```
+
+The test suite runs that hop against a fixture vLLM, not the lab GPU process.
 
 ## Develop
 

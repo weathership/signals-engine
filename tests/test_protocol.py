@@ -11,7 +11,7 @@ from signals_engine.protocol import OIP_SHA256, include_dirs
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL = ROOT / "components" / "signals-protocol"
-OIP = ROOT / "proto" / "inference" / "open_inference_grpc.proto"
+OIP = PROTOCOL / "proto" / "inference" / "open_inference_grpc.proto"
 
 
 def test_protocol_sha_matches_submodule_head() -> None:
