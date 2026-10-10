@@ -36,7 +36,7 @@ class PeerIdentity:
     primary_ui: str = ""
     health_url: str = ""
     repo_root: Path | None = None
-    version: str = "0.1.0"
+    version: str = "0.2.0"
 
 
 @dataclass(frozen=True)

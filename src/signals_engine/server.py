@@ -160,7 +160,7 @@ class LatticeEngine:
         try:
             bound = server.add_insecure_port(listen)
         except RuntimeError as exc:
-            # grpcio 1.81 raises instead of returning 0 when the port is held.
+            # grpcio raises instead of returning 0 when the port is held.
             server.stop(0)
             raise LatticeBindError(
                 f"could not bind {listen} (port held; grpc.so_reuseport=0): {exc}"

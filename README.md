@@ -114,11 +114,13 @@ snapshot and the generated stubs, so the import does not need a second
 `signals-protocol` checkout.
 
 ```bash
-uv add "signals-engine @ git+https://github.com/weathership/signals-engine.git@v0.1.0"
+uv add "signals-engine @ git+https://github.com/weathership/signals-engine.git@v0.2.0"
 ```
 
-Protobuf stays `>=5.29.1,<7` and `grpcio` / `grpcio-reflection` stay
-`>=1.81.1,<1.82`, the same window Gaius can take.
+v0.2.0 matches Semantica's runtime: `grpcio` and `grpcio-reflection` at
+`>=1.84.0`, `protobuf` at `>=7.35.1,<8`. That is the floor
+`grpcio-reflection` 1.84 declares. v0.1.0 stays the grpcio 1.81 /
+protobuf 6 tag for peers that have not moved yet.
 
 ## Develop
 
@@ -131,5 +133,7 @@ just gen    # after a signals-protocol commit and a gitlink bump
 `devenv shell` provides `gh` for the GitHub release. `direnv` picks that up
 from `.envrc`.
 
-Protobuf stays below 7, and `grpcio-reflection` stays below 1.82, so one
-environment can still sit beside Gaius.
+Regenerate the stubs with `just gen` after a `grpcio-tools` bump. The
+generated modules record that tools version, and the protobuf modules record
+the compiler version. A peer on an older grpcio or on protobuf 6 stays on
+the v0.1.0 tag.

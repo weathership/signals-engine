@@ -256,7 +256,7 @@ class OipServicer(oip_grpc.GRPCInferenceServiceServicer):
     def ServerMetadata(self, request, context):
         return oip_pb.ServerMetadataResponse(
             name=self.state.identity.project,
-            version=self.state.identity.version or "0.1.0",
+            version=self.state.identity.version or "0.2.0",
             extensions=oip.metadata_extensions(tools=self.state.serves_model),
         )
 

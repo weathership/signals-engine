@@ -5,7 +5,7 @@ import warnings
 
 from . import scheduler_pb2 as zndx_dot_scheduler_dot_v1_dot_scheduler__pb2
 
-GRPC_GENERATED_VERSION = '1.81.1'
+GRPC_GENERATED_VERSION = '1.84.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 

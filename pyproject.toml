@@ -4,23 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "signals-engine"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lattice gRPC engine for the signals federation: zndx.engine.v1 plus KServe OIP message types on one port."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [{ name = "Weathership" }]
 dependencies = [
-    # Generated stubs record grpcio 1.81.1. 1.82+ reflection needs protobuf 7,
-    # which Gaius cannot take while xai-sdk forbids it.
-    "grpcio>=1.81.1,<1.82",
-    "grpcio-reflection>=1.81.1,<1.82",
-    "protobuf>=5.29.1,<7",
+    # Same window as Semantica's lock: grpcio 1.84 and protobuf 7.
+    # grpcio-reflection 1.84 requires protobuf>=7.35.1,<8. v0.1.0 stayed on
+    # grpcio 1.81 and protobuf 6 so one env could still import xai-sdk.
+    # Projects still on that window migrate onto this release later.
+    "grpcio>=1.84.0",
+    "grpcio-reflection>=1.84.0",
+    "protobuf>=7.35.1,<8",
 ]
 
 [dependency-groups]
 dev = [
-    "grpcio-tools>=1.81.1,<1.82",
+    "grpcio-tools>=1.84.0",
     "pytest>=8",
 ]
 
