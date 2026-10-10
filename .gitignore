@@ -152,6 +152,8 @@ activemq-data/
 # Environments
 .env
 .envrc
+# The devenv entrypoint has no secrets. Keep it so direnv can enter the shell.
+!.envrc
 .venv
 env/
 venv/
@@ -218,3 +220,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# devenv / direnv
+.devenv*
+.direnv
+
