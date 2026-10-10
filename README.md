@@ -107,6 +107,19 @@ SIGNALS_UPSTREAM=127.0.0.1:<reference port> python -m signals_engine.sample
 
 The test suite runs that hop against a fixture vLLM, not the lab GPU process.
 
+## Install
+
+Semantica and later peers pin the release tag. The wheel carries the proto
+snapshot and the generated stubs, so the import does not need a second
+`signals-protocol` checkout.
+
+```bash
+uv add "signals-engine @ git+https://github.com/weathership/signals-engine.git@v0.1.0"
+```
+
+Protobuf stays `>=5.29.1,<7` and `grpcio` / `grpcio-reflection` stay
+`>=1.81.1,<1.82`, the same window Gaius can take.
+
 ## Develop
 
 ```bash
@@ -114,6 +127,9 @@ uv sync --group dev
 just test
 just gen    # after a signals-protocol commit and a gitlink bump
 ```
+
+`devenv shell` provides `gh` for the GitHub release. `direnv` picks that up
+from `.envrc`.
 
 Protobuf stays below 7, and `grpcio-reflection` stays below 1.82, so one
 environment can still sit beside Gaius.
