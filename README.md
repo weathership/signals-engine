@@ -35,7 +35,9 @@ Wire changes are additive inside a version. A break is a new package.
 2. Point this repo's gitlink at that commit.
 3. Run `just gen`. That refreshes the packaged protos, the stubs, and
    `PROTOCOL_SHA` together.
-4. Commit the gitlink and the generated tree in this repo.
+4. Commit the gitlink and the generated tree in this repo, and push them in
+   the same slice as the protocol trunk push. This pin tracks trunk. It does
+   not lag on a side branch.
 
 The OIP proto is `inference/open_inference_grpc.proto` inside that same
 commit. `OIP_SHA256` names its bytes. The stream hop — capability routing,

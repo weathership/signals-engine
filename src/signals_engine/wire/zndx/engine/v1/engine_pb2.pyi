@@ -328,6 +328,52 @@ class CompleteResponse(_message.Message):
     profile: OperatingProfile
     def __init__(self, text: _Optional[str] = ..., model: _Optional[str] = ..., prompt_tokens: _Optional[int] = ..., completion_tokens: _Optional[int] = ..., latency_ms: _Optional[float] = ..., reasoning_content: _Optional[str] = ..., finish_reason: _Optional[str] = ..., tool_calls: _Optional[_Iterable[_Union[ToolCall, _Mapping]]] = ..., reasoning: _Optional[_Iterable[_Union[ReasoningLayer, _Mapping]]] = ..., fulfilled_by: _Optional[str] = ..., profile: _Optional[_Union[OperatingProfile, _Mapping]] = ...) -> None: ...
 
+class DecisionQuestion(_message.Message):
+    __slots__ = ("id", "type", "instructions", "criteria_json")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    TYPE_FIELD_NUMBER: _ClassVar[int]
+    INSTRUCTIONS_FIELD_NUMBER: _ClassVar[int]
+    CRITERIA_JSON_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    type: str
+    instructions: str
+    criteria_json: str
+    def __init__(self, id: _Optional[str] = ..., type: _Optional[str] = ..., instructions: _Optional[str] = ..., criteria_json: _Optional[str] = ...) -> None: ...
+
+class DecideRequest(_message.Message):
+    __slots__ = ("capability", "state_json", "questions", "instructions", "cache_salt")
+    CAPABILITY_FIELD_NUMBER: _ClassVar[int]
+    STATE_JSON_FIELD_NUMBER: _ClassVar[int]
+    QUESTIONS_FIELD_NUMBER: _ClassVar[int]
+    INSTRUCTIONS_FIELD_NUMBER: _ClassVar[int]
+    CACHE_SALT_FIELD_NUMBER: _ClassVar[int]
+    capability: str
+    state_json: str
+    questions: _containers.RepeatedCompositeFieldContainer[DecisionQuestion]
+    instructions: str
+    cache_salt: str
+    def __init__(self, capability: _Optional[str] = ..., state_json: _Optional[str] = ..., questions: _Optional[_Iterable[_Union[DecisionQuestion, _Mapping]]] = ..., instructions: _Optional[str] = ..., cache_salt: _Optional[str] = ...) -> None: ...
+
+class DecideResponse(_message.Message):
+    __slots__ = ("id", "model", "answers_json", "diagnostics_json", "input_tokens", "output_tokens", "latency_ms", "fulfilled_by")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    MODEL_FIELD_NUMBER: _ClassVar[int]
+    ANSWERS_JSON_FIELD_NUMBER: _ClassVar[int]
+    DIAGNOSTICS_JSON_FIELD_NUMBER: _ClassVar[int]
+    INPUT_TOKENS_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_TOKENS_FIELD_NUMBER: _ClassVar[int]
+    LATENCY_MS_FIELD_NUMBER: _ClassVar[int]
+    FULFILLED_BY_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    model: str
+    answers_json: str
+    diagnostics_json: str
+    input_tokens: int
+    output_tokens: int
+    latency_ms: float
+    fulfilled_by: str
+    def __init__(self, id: _Optional[str] = ..., model: _Optional[str] = ..., answers_json: _Optional[str] = ..., diagnostics_json: _Optional[str] = ..., input_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., latency_ms: _Optional[float] = ..., fulfilled_by: _Optional[str] = ...) -> None: ...
+
 class StatusRequest(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
